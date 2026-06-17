@@ -1,0 +1,52 @@
+name: 東京市場モーニングレポート自動生成
+
+on:
+  schedule:
+    - cron: '30 22 * * 1-5'  # 毎週月〜金 7:30 JST (22:30 UTC)
+  workflow_dispatch:           # 手動実行ボタンも有効
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies (Japanese fonts + WeasyPrint)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            libpango-1.0-0 libpangoft2-1.0-0 \
+            fonts-ipafont-gothic fonts-ipafont-mincho \
+            fonts-noto-cjk
+
+      - name: Install Python packages
+        run: |
+          pip install --quiet \
+            anthropic \
+            duckduckgo-search \
+            markdown \
+            weasyprint
+
+      - name: Generate report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/generate_report.py
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --staged --quiet || \
+            git commit -m "モーニングレポート $(TZ=Asia/Tokyo date +%Y-%m-%d) を自動生成"
+          git push
