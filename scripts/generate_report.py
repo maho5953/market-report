@@ -15,11 +15,15 @@ from pathlib import Path
 import anthropic
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     HAS_DDG = True
 except ImportError:
-    HAS_DDG = False
-    print("WARNING: duckduckgo-search not installed", file=sys.stderr)
+    try:
+        from duckduckgo_search import DDGS
+        HAS_DDG = True
+    except ImportError:
+        HAS_DDG = False
+        print("WARNING: ddgs not installed", file=sys.stderr)
 
 try:
     import markdown as md_lib
