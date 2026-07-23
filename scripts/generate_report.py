@@ -58,13 +58,17 @@ def web_search(query: str, max_results: int = 6) -> str:
         return "検索ツール未インストール"
     for attempt in range(3):
         try:
-            time.sleep(0.8 * (attempt + 1))
+            time.sleep(1.0 * (attempt + 1))
             with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
+                # ニュース検索を優先（最新市場データに強い）
+                results = list(ddgs.news(query, max_results=max_results))
+                if not results:
+                    # フォールバック: テキスト検索
+                    results = list(ddgs.text(query, max_results=max_results))
             if not results:
                 return "検索結果なし"
             return "\n\n".join(
-                f"【{r['title']}】\n{r['href']}\n{r['body']}"
+                f"【{r['title']}】\n{r.get('url', r.get('href', ''))} \n{r.get('body', r.get('excerpt', ''))}"
                 for r in results
             )
         except Exception as e:
@@ -94,15 +98,29 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
     system = (
         "あなたは東京株式市場の専門アナリストです。"
         "web_searchツールで最新データを収集し、日本語のモーニングレポートを作成します。"
+        "検索は日本語と英語の両方を試し、kabutan.jp・nikkei.com・bloomberg.co.jp・minkabu.jp・zaikei.co.jpなど"
+        "信頼性の高い金融ニュースサイトの結果を優先してください。"
+        "1回の検索で結果が不十分な場合は、クエリを変えて複数回検索してください。"
         "調査完了後、Markdownのレポート本文だけを出力してください。説明文・コメント不要。"
     )
 
     prev_bd_str = f"{prev_bd.month}月{prev_bd.day}日"
+    prev_bd_ymd = prev_bd.strftime('%Y年%m月%d日')
+    prev_bd_slash = prev_bd.strftime('%Y/%m/%d')
     today_str = f"{today.strftime('%Y年%m月%d日')}({WEEKDAY_JP[today.weekday()]})"
 
-    prompt = f"""今日は{today_str}です。前営業日は{prev_bd.strftime('%Y年%m月%d日')}です。
+    prompt = f"""今日は{today_str}です。前営業日は{prev_bd_ymd}です。
 
-web_searchを使って次の情報を収集し、モーニングレポートを作成してください。
+以下の手順でweb_searchを使って情報を収集し、モーニングレポートを作成してください。
+
+■ 推奨検索クエリ（これを参考に実際の日付で検索してください）
+- 「日経平均 大引け {prev_bd_str}」
+- 「{prev_bd_slash} 日経平均 終値 寄与度」
+- 「{prev_bd_str} 東証 値上がり 値下がり ランキング」
+- 「{prev_bd_str} ニューヨーク ダウ S&P500 ナスダック」
+- 「SOX指数 半導体 {prev_bd_str}」
+- 「シカゴ日経先物 ドル円 {prev_bd_str}」
+- 「Nikkei 225 futures {prev_bd.strftime('%B %d %Y')}」（英語クエリも試す）
 
 ■ 収集項目
 1. 前営業日({prev_bd_str})の東証:
