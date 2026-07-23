@@ -2,8 +2,14 @@
 """東京市場モーニングレポート自動生成スクリプト"""
 
 import datetime
+import os
+import smtplib
 import sys
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 from pathlib import Path
 
 import anthropic
@@ -218,6 +224,44 @@ def ensure_css(docs_dir: Path):
         css_path.write_text(WEB_CSS, encoding="utf-8")
 
 
+def send_email(subject: str, html_body: str, pdf_path: Path = None):
+    """Gmail SMTPでメール送信。環境変数未設定の場合はスキップ。"""
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD")
+    recipient  = os.environ.get("GMAIL_RECIPIENT") or gmail_user
+
+    if not gmail_user or not gmail_pass:
+        print("Gmail credentials not set, skipping email.")
+        return
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"]    = gmail_user
+    msg["To"]      = recipient
+
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    if pdf_path and pdf_path.exists():
+        with open(pdf_path, "rb") as f:
+            part = MIMEBase("application", "pdf")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            f'attachment; filename="{pdf_path.name}"'
+        )
+        msg.attach(part)
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, recipient, msg.as_bytes())
+        print(f"Email sent to {recipient}")
+    except Exception as e:
+        print(f"Email failed (non-fatal): {e}", file=sys.stderr)
+
+
 def main():
     today = jst_today()
     prev_bd = prev_business_day(today)
@@ -239,14 +283,16 @@ def main():
     docs_dir.mkdir(exist_ok=True)
     ensure_css(docs_dir)
 
+    html_content = to_html(report_md, today)
     html_path = docs_dir / f"{date_str}.html"
-    html_path.write_text(to_html(report_md, today), encoding="utf-8")
+    html_path.write_text(html_content, encoding="utf-8")
     print(f"Saved: {html_path}")
 
     update_index(docs_dir)
     print("Updated: docs/index.html")
 
     # PDF
+    pdf_path = None
     if HAS_PDF:
         try:
             pdf_path = REPO_ROOT / f"{date_str}.pdf"
@@ -254,6 +300,12 @@ def main():
             print(f"Saved: {pdf_path}")
         except Exception as e:
             print(f"PDF generation skipped: {e}", file=sys.stderr)
+            pdf_path = None
+
+    # メール送信
+    wd = WEEKDAY_JP[today.weekday()]
+    subject = f"📈 東京市場モーニングレポート {today.strftime('%Y年%m月%d日')}({wd})"
+    send_email(subject, html_content, pdf_path)
 
     print("Done.")
 
