@@ -3,9 +3,12 @@
 
 import datetime
 import os
+import re
 import smtplib
 import sys
 import time
+import urllib.request
+import urllib.error
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -77,13 +80,41 @@ def web_search(query: str, max_results: int = 6) -> str:
     return "検索失敗"
 
 
+def fetch_url(url: str) -> str:
+    """指定URLのHTMLを取得してプレーンテキストに変換"""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en;q=0.9",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            html = resp.read().decode(charset, errors="replace")
+        # タグ除去・空白整理
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&[a-z]+;", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()[:8000]
+    except Exception as e:
+        return f"取得エラー: {e}"
+
+
 def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
     client = anthropic.Anthropic()
 
     tools = [
         {
             "name": "web_search",
-            "description": "最新の株式市場・為替・ニュースをWeb検索します。",
+            "description": "最新の株式市場・為替・ニュースをWeb検索します。URLが不明な場合に使用。",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -92,15 +123,27 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
                 },
                 "required": ["query"]
             }
+        },
+        {
+            "name": "fetch_url",
+            "description": (
+                "指定URLのページを直接取得してテキストを返します。"
+                "株探・JPX・minkabu等の金融データページを直接フェッチするのに使います。"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "取得するURL"}
+                },
+                "required": ["url"]
+            }
         }
     ]
 
     system = (
         "あなたは東京株式市場の専門アナリストです。"
-        "web_searchツールで最新データを収集し、日本語のモーニングレポートを作成します。"
-        "検索は日本語と英語の両方を試し、kabutan.jp・nikkei.com・bloomberg.co.jp・minkabu.jp・zaikei.co.jpなど"
-        "信頼性の高い金融ニュースサイトの結果を優先してください。"
-        "1回の検索で結果が不十分な場合は、クエリを変えて複数回検索してください。"
+        "fetch_urlとweb_searchツールで最新データを収集し、日本語のモーニングレポートを作成します。"
+        "ランキングデータは fetch_url で直接ページを取得する方が確実です。"
         "調査完了後、Markdownのレポート本文だけを出力してください。説明文・コメント不要。"
     )
 
@@ -109,18 +152,30 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
     prev_bd_slash = prev_bd.strftime('%Y/%m/%d')
     today_str = f"{today.strftime('%Y年%m月%d日')}({WEEKDAY_JP[today.weekday()]})"
 
+    kabutan_date = prev_bd.strftime('%Y%m%d')
+
     prompt = f"""今日は{today_str}です。前営業日は{prev_bd_ymd}です。
 
-以下の手順でweb_searchを使って情報を収集し、モーニングレポートを作成してください。
+以下のURLを fetch_url で直接取得し、データを収集してください。取得できない場合は web_search で補完してください。
 
-■ 推奨検索クエリ（これを参考に実際の日付で検索してください）
-- 「日経平均 大引け {prev_bd_str}」
-- 「{prev_bd_slash} 日経平均 終値 寄与度」
-- 「{prev_bd_str} 東証 値上がり 値下がり ランキング」
-- 「{prev_bd_str} ニューヨーク ダウ S&P500 ナスダック」
-- 「SOX指数 半導体 {prev_bd_str}」
-- 「シカゴ日経先物 ドル円 {prev_bd_str}」
-- 「Nikkei 225 futures {prev_bd.strftime('%B %d %Y')}」（英語クエリも試す）
+■ 必ず fetch_url で取得するページ（前営業日={prev_bd_str}のデータ）
+
+【東証ランキング・日経平均】
+- 株探 値上がりランキング(プライム): https://kabutan.jp/warning/?mode=2_1&market=1&capitalization=0
+- 株探 値下がりランキング(プライム): https://kabutan.jp/warning/?mode=3_1&market=1&capitalization=0
+- 株探 売買代金ランキング(プライム): https://kabutan.jp/warning/?mode=0_1&market=1&capitalization=0
+- みんかぶ 日経平均: https://minkabu.jp/stock/998407/daily_bar
+- 株探 市場ニュース: https://kabutan.jp/news/marketnews/
+
+【米国市場・先物・為替】
+- みんかぶFX ドル円: https://fx.minkabu.jp/pair/USDJPY
+- 株探 シカゴ先物: https://kabutan.jp/news/marketnews/?b=n
+
+■ web_search で補完する項目
+- 「{prev_bd_str} 日経平均 終値 前日比 売買代金」
+- 「{prev_bd_str} ダウ S&P500 ナスダック 終値」
+- 「SOX指数 {prev_bd_str}」
+- 「シカゴ日経先物 {prev_bd_str}」
 
 ■ 収集項目
 1. 前営業日({prev_bd_str})の東証:
@@ -164,11 +219,16 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
         if response.stop_reason == "tool_use":
             results = []
             for block in response.content:
-                if block.type == "tool_use" and block.name == "web_search":
-                    res = web_search(
-                        block.input["query"],
-                        block.input.get("max_results", 6)
-                    )
+                if block.type == "tool_use":
+                    if block.name == "web_search":
+                        res = web_search(
+                            block.input["query"],
+                            block.input.get("max_results", 6)
+                        )
+                    elif block.name == "fetch_url":
+                        res = fetch_url(block.input["url"])
+                    else:
+                        res = "不明なツール"
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
