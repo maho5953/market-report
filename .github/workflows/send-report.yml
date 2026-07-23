@@ -1,0 +1,36 @@
+name: 既存レポートをメール送信
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '送信するレポートの日付 (YYYY-MM-DD、空欄=今日)'
+        required: false
+        default: ''
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install packages
+        run: pip install --quiet markdown
+
+      - name: Send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_RECIPIENT: ${{ secrets.GMAIL_RECIPIENT }}
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            python scripts/send_existing_report.py "${{ github.event.inputs.date }}"
+          else
+            python scripts/send_existing_report.py
+          fi
