@@ -81,25 +81,32 @@ def web_search(query: str, max_results: int = 6) -> str:
 
 
 def fetch_url(url: str) -> str:
-    """指定URLのHTMLを取得してプレーンテキストに変換"""
+    """指定URLのページを取得してテキストを返す"""
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "ja,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate",
     }
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
+            import gzip
+            raw = resp.read()
+            if resp.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
             charset = resp.headers.get_content_charset() or "utf-8"
-            html = resp.read().decode(charset, errors="replace")
+            html = raw.decode(charset, errors="replace")
         # タグ除去・空白整理
         text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&#[0-9]+;", "", text)
         text = re.sub(r"&[a-z]+;", "", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -108,13 +115,40 @@ def fetch_url(url: str) -> str:
         return f"取得エラー: {e}"
 
 
+def fetch_stooq_index(symbol: str, days: int = 5) -> str:
+    """stooq.com からCSV形式で指数の終値を取得（ブロックなし）"""
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            csv = resp.read().decode("utf-8", errors="replace")
+        lines = [l for l in csv.strip().splitlines() if l and not l.startswith("Date")]
+        return "\n".join(lines[-days:]) if lines else "データなし"
+    except Exception as e:
+        return f"取得エラー: {e}"
+
+
 def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
     client = anthropic.Anthropic()
+
+    # stooq.com から主要指数データを事前取得（ブロックなし）
+    stooq_data = {
+        "日経平均 (^NKX)":   fetch_stooq_index("^nkx"),
+        "NYダウ (^DJI)":     fetch_stooq_index("^dji"),
+        "S&P500 (^SPX)":    fetch_stooq_index("^spx"),
+        "ナスダック (^NDQ)": fetch_stooq_index("^ndq"),
+        "SOX指数 (^SOX)":   fetch_stooq_index("^sox"),
+        "ドル円 (USDJPY)":   fetch_stooq_index("usdjpy"),
+    }
+    stooq_text = "\n\n".join(
+        f"【{name}】\nDate,Open,High,Low,Close,Volume\n{data}"
+        for name, data in stooq_data.items()
+    )
 
     tools = [
         {
             "name": "web_search",
-            "description": "最新の株式市場・為替・ニュースをWeb検索します。URLが不明な場合に使用。",
+            "description": "最新の株式市場ニュース・銘柄情報をWeb検索します。",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -126,10 +160,7 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
         },
         {
             "name": "fetch_url",
-            "description": (
-                "指定URLのページを直接取得してテキストを返します。"
-                "株探・JPX・minkabu等の金融データページを直接フェッチするのに使います。"
-            ),
+            "description": "指定URLのページを直接取得してテキストを返します。",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -152,45 +183,34 @@ def run_agent(today: datetime.date, prev_bd: datetime.date) -> str:
     prev_bd_slash = prev_bd.strftime('%Y/%m/%d')
     today_str = f"{today.strftime('%Y年%m月%d日')}({WEEKDAY_JP[today.weekday()]})"
 
-    kabutan_date = prev_bd.strftime('%Y%m%d')
-
     prompt = f"""今日は{today_str}です。前営業日は{prev_bd_ymd}です。
 
-以下のURLを fetch_url で直接取得し、データを収集してください。取得できない場合は web_search で補完してください。
+■ 取得済み指数データ（stooq.com より）
+以下のCSVデータをそのまま使用して終値・前日比を計算してください（Date,Open,High,Low,Close,Volume の順）。
 
-■ 必ず fetch_url で取得するページ（前営業日={prev_bd_str}のデータ）
+{stooq_text}
 
-【東証ランキング・日経平均】
-- 株探 値上がりランキング(プライム): https://kabutan.jp/warning/?mode=2_1&market=1&capitalization=0
-- 株探 値下がりランキング(プライム): https://kabutan.jp/warning/?mode=3_1&market=1&capitalization=0
-- 株探 売買代金ランキング(プライム): https://kabutan.jp/warning/?mode=0_1&market=1&capitalization=0
-- みんかぶ 日経平均: https://minkabu.jp/stock/998407/daily_bar
-- 株探 市場ニュース: https://kabutan.jp/news/marketnews/
+■ web_search で追加収集する項目
+以下のクエリで検索し、銘柄情報・ニュースを補完してください：
+- 「{prev_bd_str} 日経平均 値上がり 値下がり ランキング 東証プライム」
+- 「{prev_bd_str} 日経平均 寄与度 ランキング」
+- 「{prev_bd_str} シカゴ 日経先物 清算値」
+- 「{prev_bd_str} ニューヨーク市場 ダウ 半導体株 エヌビディア」
 
-【米国市場・先物・為替】
-- みんかぶFX ドル円: https://fx.minkabu.jp/pair/USDJPY
-- 株探 シカゴ先物: https://kabutan.jp/news/marketnews/?b=n
-
-■ web_search で補完する項目
-- 「{prev_bd_str} 日経平均 終値 前日比 売買代金」
-- 「{prev_bd_str} ダウ S&P500 ナスダック 終値」
-- 「SOX指数 {prev_bd_str}」
-- 「シカゴ日経先物 {prev_bd_str}」
-
-■ 収集項目
+■ レポート作成指示
 1. 前営業日({prev_bd_str})の東証:
-   - 日経平均 終値・前日比・売買代金
+   - 日経平均 終値・前日比・売買代金（上記CSVのClose値から計算）
    - 値上がり上位銘柄(プライム・売買代金上位中心)と理由 ※理由不明は「材料不明」
    - 値下がり上位銘柄と理由(同条件)
-   - 日経平均寄与度ランキング
+   - 日経平均寄与度ランキング（web_search結果から）
 
 2. 昨夜の米国市場({prev_bd_str}):
-   - ダウ・S&P500・ナスダック 終値と前日比
-   - SOX指数(フィラデルフィア半導体株指数)
+   - ダウ・S&P500・ナスダック 終値と前日比（上記CSVから）
+   - SOX指数（上記CSVから）
    - エヌビディアなど主要半導体株の動き
    - 騰落の主な理由
 
-3. シカゴ日経平均先物 清算値(大証日中終値比) とドル円レート
+3. シカゴ日経平均先物 清算値(大証日中終値比) とドル円レート（CSVとweb_search両方から）
 
 4. 本日の東京市場の見通し
 
@@ -384,10 +404,13 @@ def main():
             print(f"PDF generation skipped: {e}", file=sys.stderr)
             pdf_path = None
 
-    # メール送信
-    wd = WEEKDAY_JP[today.weekday()]
-    subject = f"📈 東京市場モーニングレポート {today.strftime('%Y年%m月%d日')}({wd})"
-    send_email(subject, html_content, pdf_path)
+    # メール送信（SEND_EMAIL=true のときのみ）
+    if os.environ.get("SEND_EMAIL", "false").lower() == "true":
+        wd = WEEKDAY_JP[today.weekday()]
+        subject = f"📈 東京市場モーニングレポート {today.strftime('%Y年%m月%d日')}({wd})"
+        send_email(subject, html_content, pdf_path)
+    else:
+        print("Email skipped (SEND_EMAIL != true)")
 
     print("Done.")
 
